@@ -1,12 +1,12 @@
 from starlette.testclient import TestClient
 from limnoria_mcp.server import create_app
-from limnoria_mcp.files import PluginFiles
+from limnoria_mcp.files import ScriptFiles
 
 TOKEN = 'synthetic-test-token-not-a-secret-123456'
 
 def test_auth_and_protocol(tmp_path):
-    files = PluginFiles(str(tmp_path))
-    app = create_app(files, lambda name, reload: {'plugin': name}, TOKEN)
+    files = ScriptFiles(str(tmp_path))
+    app = create_app(files, None, TOKEN)
     headers = {'Authorization': 'Bearer ' + TOKEN, 'Accept': 'application/json, text/event-stream',
                'Host': '127.0.0.1:8765'}
     with TestClient(app) as client:
@@ -17,10 +17,10 @@ def test_auth_and_protocol(tmp_path):
         assert response.status_code == 200, response.text
         assert 'serverInfo' in response.json()['result']
         response = client.post('/mcp', headers=headers, json={'jsonrpc':'2.0','id':2,'method':'tools/list','params':{}})
-        assert {t['name'] for t in response.json()['result']['tools']} == {'list_plugins','read_plugin_file','write_plugin_file','load_plugin','reload_plugin'}
-        response = client.post('/mcp', headers=headers, json={'jsonrpc':'2.0','id':3,'method':'tools/call','params':{'name':'write_plugin_file','arguments':{'plugin':'AgentHello','filename':'plugin.py','content':'x=1'}}})
+        assert {t['name'] for t in response.json()['result']['tools']} == {'list_scripts','read_script','write_script','validate_script','activate_script','script_status'}
+        response = client.post('/mcp', headers=headers, json={'jsonrpc':'2.0','id':3,'method':'tools/call','params':{'name':'write_script','arguments':{'name':'AgentHello','source':'x=1'}}})
         assert not response.json()['result'].get('isError'), response.text
-        assert files.read('AgentHello','plugin.py') == 'x=1'
+        assert files.read('AgentHello') == 'x=1'
     files.close()
 
 

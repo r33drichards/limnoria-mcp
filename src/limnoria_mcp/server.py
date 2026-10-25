@@ -57,36 +57,40 @@ class LocalBearer:
         await self.app(scope, receive, send)
 
 
-def create_app(files, lifecycle, token: str):
+def create_app(files, runtime, token: str):
     if len(token) < 32 or token.strip() != token:
         raise ValueError('Supply an external bearer token of at least 32 characters')
-    mcp = FastMCP('Limnoria managed plugins')
+    mcp = FastMCP('Limnoria Safe Tcl scripts')
 
     @mcp.tool()
-    def list_plugins() -> list[str]:
-        """List managed plugin directories (not all installed bot plugins)."""
+    def list_scripts() -> list[str]:
+        """List named Tcl scripts. No Python plugin access."""
         return files.list()
 
     @mcp.tool()
-    def read_plugin_file(plugin: str, filename: str) -> str:
-        """Read __init__.py, plugin.py, config.py or README.md in a managed plugin."""
-        return files.read(plugin, filename)
+    def read_script(name: str) -> str:
+        """Read the bounded Tcl source of one named script."""
+        return files.read(name)
 
     @mcp.tool()
-    def write_plugin_file(plugin: str, filename: str, content: str) -> dict:
-        """Write a managed plugin file. Loading Python grants bot-account code execution."""
-        return files.write(plugin, filename, content)
+    def write_script(name: str, source: str) -> dict:
+        """Atomically write Tcl source; does not activate it or execute Python."""
+        return files.write(name, source)
 
     @mcp.tool()
-    def load_plugin(plugin: str) -> dict:
-        """Load an Agent-prefixed plugin on the bot loop. Executes Python as bot user."""
-        return lifecycle(plugin, False)
+    def validate_script(name: str) -> dict:
+        """Stage in the isolated Safe Tcl worker; discard all replies and state."""
+        return runtime.validate(name)
 
     @mcp.tool()
-    def reload_plugin(plugin: str) -> dict:
-        """Reload a managed plugin on the bot loop. Not an arbitrary IRC command."""
-        return lifecycle(plugin, True)
+    def activate_script(name: str) -> dict:
+        """Validate and hot-swap one script generation; failure keeps old version."""
+        return runtime.activate(name)
 
-    # FastMCP owns its HTTP session-manager lifespan; do not wrap or double-run it.
+    @mcp.tool()
+    def script_status() -> dict:
+        """List active script versions without exposing per-script state."""
+        return {'scripts': runtime.status(), 'bundle': runtime.bundle_status()}
+
     return mcp.http_app(path='/mcp', stateless_http=True, json_response=True,
                         middleware=[Middleware(LocalBearer, token=token)])

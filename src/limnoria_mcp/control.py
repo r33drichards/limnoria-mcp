@@ -51,7 +51,7 @@ async def proxy_tool(name: str, arguments: dict):
     from mcp import ClientSession
     from mcp.client.streamable_http import streamable_http_client
     import httpx
-    allowed = {'list_plugins', 'read_plugin_file', 'write_plugin_file', 'load_plugin', 'reload_plugin'}
+    allowed = {'list_scripts', 'read_script', 'write_script', 'validate_script', 'activate_script', 'script_status'}
     if name not in allowed:
         raise ValueError('Unsupported bot tool')
     token = Path(os.environ['LIMNORIA_MCP_TOKEN_FILE']).read_text().strip()
@@ -67,29 +67,34 @@ async def proxy_tool(name: str, arguments: dict):
 
 
 def register_proxy(mcp):
-    from .files import PluginFiles
-    files = PluginFiles(os.environ['LIMNORIA_MCP_PLUGIN_ROOT'])
+    from .files import ScriptFiles
+    files = ScriptFiles(os.environ['LIMNORIA_MCP_SCRIPT_ROOT'])
     @mcp.tool()
-    async def list_plugins():
-        """List managed plugin directories, even when the bot is down."""
+    async def list_scripts():
+        """List Tcl scripts, even when the bot is down."""
         return files.list()
 
     @mcp.tool()
-    async def read_plugin_file(plugin: str, filename: str):
-        """Read a bounded managed plugin source file."""
-        return files.read(plugin, filename)
+    async def read_script(name: str):
+        """Read bounded Tcl source, never Python plugin files."""
+        return files.read(name)
 
     @mcp.tool()
-    async def write_plugin_file(plugin: str, filename: str, content: str):
-        """Write managed plugin Python. Loading grants code execution as the bot user."""
-        return files.write(plugin, filename, content)
+    async def write_script(name: str, source: str):
+        """Write Tcl source only. Activation is a separate explicit action."""
+        return files.write(name, source)
 
     @mcp.tool()
-    async def load_plugin(plugin: str):
-        """Load an Agent-prefixed managed plugin (executes bot-account Python)."""
-        return await proxy_tool('load_plugin', {'plugin': plugin})
+    async def validate_script(name: str):
+        """Validate in isolated staging with no live reply/state effects."""
+        return await proxy_tool('validate_script', {'name': name})
 
     @mcp.tool()
-    async def reload_plugin(plugin: str):
-        """Reload a managed plugin; does not expose arbitrary IRC commands."""
-        return await proxy_tool('reload_plugin', {'plugin': plugin})
+    async def activate_script(name: str):
+        """Atomically activate a validated Tcl generation; no bot restart."""
+        return await proxy_tool('activate_script', {'name': name})
+
+    @mcp.tool()
+    async def script_status():
+        """Get active Tcl generation hashes, not internal script state."""
+        return await proxy_tool('script_status', {})

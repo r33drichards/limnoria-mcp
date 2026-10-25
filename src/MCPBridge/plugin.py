@@ -1,98 +1,61 @@
-import concurrent.futures
-import importlib.util
+"""Immutable host bridge: no agent-controlled Python imports or IRC dispatch."""
 import os
-import sys
 import threading
-import time
-import uuid
 from pathlib import Path
-
 import uvicorn
-from supybot import callbacks, conf, plugin, schedule
-from limnoria_mcp.files import PluginFiles, plugin_name
+from supybot import callbacks
+from supybot.commands import wrap, optional
+from limnoria_mcp.files import ScriptFiles
+from limnoria_mcp.runtime import ScriptRuntime
 from limnoria_mcp.server import create_app
 
 
 class MCPBridge(callbacks.Plugin):
-    """Local MCP bridge. No commands are exposed to IRC users."""
+    """Owner-invoked Safe Tcl scripts through a separate unprivileged worker."""
+    threaded = True
+
     def __init__(self, irc):
         super().__init__(irc)
-        self.irc = irc
-        self.files = PluginFiles(os.environ['LIMNORIA_MCP_PLUGIN_ROOT'])
+        self.files = ScriptFiles(os.environ['LIMNORIA_MCP_SCRIPT_ROOT'])
+        bundle_root = os.environ.get('LIMNORIA_MCP_BUNDLE_DIR')
+        self.runtime = ScriptRuntime(self.files, gitops=bool(bundle_root))
+        self.watcher = None
+        if bundle_root:
+            from limnoria_mcp.bundle_runtime import BundleWatcher
+            self.watcher = BundleWatcher(self.runtime, bundle_root,
+                os.environ['LIMNORIA_MCP_LAST_GOOD_FILE'],
+                int(os.environ.get('LIMNORIA_MCP_BUNDLE_POLL_SECONDS', '15')))
+            self.watcher.thread.start()
         token = Path(os.environ['LIMNORIA_MCP_TOKEN_FILE']).read_text().strip()
-        self.closed = False
-        app = create_app(self.files, self.lifecycle, token)
+        app = create_app(self.files, self.runtime, token)
         port = int(os.environ.get('LIMNORIA_MCP_PORT', '8765'))
         self.server = uvicorn.Server(uvicorn.Config(app, host='127.0.0.1', port=port,
                                                    access_log=False, log_level='warning'))
         self.thread = threading.Thread(target=self.server.run, name='limnoria-mcp', daemon=True)
         self.thread.start()
 
-    def lifecycle(self, name, reload):
-        plugin_name(name)
-        if self.closed:
-            raise RuntimeError('Bridge is stopping')
-        future = concurrent.futures.Future()
-        def run():
-            if not future.set_running_or_notify_cancel():
-                return
-            try:
-                future.set_result(self._load(name, reload))
-            except Exception as exc:
-                future.set_exception(exc)
-        schedule.addEvent(run, time.time(), name='mcp-' + uuid.uuid4().hex)
-        try:
-            return future.result(timeout=15)
-        except concurrent.futures.TimeoutError:
-            future.cancel()
-            raise RuntimeError('Bot loop timed out; action may be running, inspect status before retry') from None
+    def tclrun(self, irc, msg, args, name, text):
+        """<script> [text]
 
-    def _load(self, name, reload):
-        if self.closed:
-            raise RuntimeError('Bridge is stopping')
-        # Validate every supported source file without following links before import.
-        self.files.read(name, '__init__.py')
-        for filename in ('plugin.py', 'config.py'):
-            try:
-                self.files.read(name, filename)
-            except FileNotFoundError:
-                pass
-        existing = self.irc.getCallback(name)
-        if bool(existing) != bool(reload):
-            raise ValueError('Use reload for a loaded plugin, load for a new plugin')
-        old_modules = {k: v for k, v in sys.modules.copy().items()
-                       if k == name or k.startswith(name + '.')}
-        for key in old_modules:
-            del sys.modules[key]
-        path = str(Path(self.files.root) / name / '__init__.py')
-        spec = importlib.util.spec_from_file_location(name, path)
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[name] = module
-        removed = []
+        Run an activated Safe Tcl script. Owner capability required. Replies are
+        confined to this invocation; scripts cannot choose another destination.
+        """
+        context = {'network': irc.network, 'channel': msg.args[0],
+                   'nick': msg.nick, 'text': text or ''}
         try:
-            spec.loader.exec_module(module)
-            removed = self.irc.removeCallback(name) if existing else []
-            callback = plugin.loadPluginClass(self.irc, module)
+            result = self.runtime.invoke(name, context)
         except Exception:
-            for key in list(sys.modules):
-                if key == name or key.startswith(name + '.'):
-                    del sys.modules[key]
-            sys.modules.update(old_modules)
-            for cb in removed:
-                self.irc.addCallback(cb)
-            raise
-        cleanup_errors = 0
-        for cb in removed:
-            try:
-                cb.die()
-            except Exception:
-                cleanup_errors += 1
-        conf.registerPlugin(callback.name(), True)
-        return {'plugin': callback.name(), 'action': 'reload' if reload else 'load',
-                'cleanup_errors': cleanup_errors}
+            irc.error('Safe Tcl execution failed; no script replies or state were committed.')
+            return
+        for reply in result['replies']:
+            irc.reply(reply, prefixNick=False)
+
+    tclrun = wrap(tclrun, [('checkCapability', 'owner'), 'something', optional('text')])
 
     def die(self):
-        self.closed = True
+        if self.watcher:
+            self.watcher.stop.set()
+            self.watcher.thread.join(timeout=5)
         self.server.should_exit = True
         self.thread.join(timeout=5)
         if not self.thread.is_alive():

@@ -5,7 +5,7 @@ import time
 import anyio
 import uvicorn
 from limnoria_mcp.control import proxy_tool
-from limnoria_mcp.files import PluginFiles
+from limnoria_mcp.files import ScriptFiles
 from limnoria_mcp.server import create_app
 
 
@@ -14,8 +14,8 @@ def test_proxy_roundtrip(tmp_path, monkeypatch):
     token.write_text('synthetic-test-only-token-for-local-tests-0000')
     plugins = tmp_path / 'plugins'
     plugins.mkdir()
-    files = PluginFiles(str(plugins))
-    app = create_app(files, lambda name, reload: {'plugin': name}, token.read_text())
+    files = ScriptFiles(str(plugins))
+    app = create_app(files, None, token.read_text())
     listener = socket.socket()
     listener.bind(('127.0.0.1', 0))
     listener.listen()
@@ -31,9 +31,9 @@ def test_proxy_roundtrip(tmp_path, monkeypatch):
             time.sleep(.01)
         assert server.started
         async def run():
-            result = await proxy_tool('write_plugin_file', {'plugin':'AgentRoundtrip','filename':'plugin.py','content':'value=1'})
+            result = await proxy_tool('write_script', {'name':'AgentRoundtrip','source':'value=1'})
             assert not result.isError
-            result = await proxy_tool('read_plugin_file', {'plugin':'AgentRoundtrip','filename':'plugin.py'})
+            result = await proxy_tool('read_script', {'name':'AgentRoundtrip'})
             assert result.content[0].text == 'value=1'
         anyio.run(run)
     finally:

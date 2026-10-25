@@ -1,125 +1,179 @@
-# NixOS + FastMCP + actual mcp-js integration
+# NixOS + FastMCP + Safe Tcl + mcp-js
 
-## Topology and recovery
+## Runtime separation
 
 ```
-authenticated MCP client
-    -> mcp-js-limnoria (127.0.0.1:8766, JWKS verification)
-        -> immutable stdio limnoria-mcp-control (same unprivileged UID)
-            -> descriptor-confined managed plugin files (works offline)
-            -> on-demand authenticated HTTP MCPBridge in supybot (127.0.0.1:8765)
-            -> fixed helper -> Unix socket -> root single-unit broker
+authenticated client -> loopback mcp-js companion
+  -> immutable stdio FastMCP controller
+       -> descriptor-confined named script.tcl files (works with bot down)
+       -> authenticated loopback immutable MCPBridge (validate/activate/status)
+       -> fixed helper -> root single-unit service-control broker
+
+immutable bot MCPBridge -> bot-only Unix socket
+  -> credential-free limnoria-tcl-worker UID
+       -> fresh isolated Python / Safe Tcl child per invocation
 ```
 
-The companion has **no dependency on the bot being up**. The stdio bridge statically
-advertises tools and connects to the bot only when a plugin tool is called. This
-matters because mcp-js connects configured upstreams at startup: a direct HTTP
-upstream would otherwise make cold-start recovery fail while the bot is down.
-Start/stop/restart/status/logs and bounded plugin file read/write/list remain
-callable while the bot is down. Only load/reload require a live bot. A bot reload does not terminate the separate controller.
+Only **Tcl script data** is agent-writable. There is no API to write Python, load a
+Python plugin, import an arbitrary module, or execute a shell. The trusted
+MCPBridge Python plugin and all launchers/brokers live in the immutable Nix store.
+The managed script directory is **not** a Python plugin search directory.
 
-## Configuration, not deployment
+The bot keeps an active source snapshot. Validating/activating an edited script
+uses the isolated worker; failure leaves the previous active snapshot unchanged.
+Successful activation swaps only that named script, without restarting the bot.
+State is bounded bot memory and resets on activation/restart. Files remain
+repairable through the separate controller even if the bot is down. Bot service
+start/stop/restart/status/logs likewise remain independent of the bot MCP endpoint.
 
-Import `nixosModules.default` from this flake and adapt `examples/nixos.nix`.
-The bridge uses the standalone **FastMCP** framework, not a FastAPI wrapper.
-The module uses native **`services.supybot`**, whose Python environment contains
-`python3Packages.limnoria`; it extends `extraPackages` and installs immutable
-`MCPBridge` using the native `plugins` option. The operator's Limnoria config must
-load MCPBridge (`supybot.plugins.MCPBridge: True`) and use absolute state paths,
-as required by the upstream module. Generate/review the config with Limnoria's
-wizard rather than copying any live credentials into the repository.
+## Operator configuration (not deployment)
 
-Required runtime inputs are an operator-provisioned bearer-token file (at least
-32 characters, shared with the bot through systemd credentials), a valid initial
-bot config, and an approved HTTPS JWKS issuer for the companion's clients. No
-secret values appear in generated Nix store files. The module creates neither a
-token nor an identity-provider configuration. Both HTTP listeners are loopback
-only, and this module opens no firewall ports. Any reverse proxy/network exposure
-and issuer/audience policy require separate review. JWKS configuration trusts
-identities accepted by that issuer; it is not a per-user authorization policy.
+Import this flake's `nixosModules.default` and adapt `examples/nixos.nix`. Native
+`services.supybot` runs `python3Packages.limnoria`; this module extends its
+`extraPackages` and immutable `plugins.MCPBridge` entry. The initial operator-owned
+Limnoria configuration must load MCPBridge and use absolute state paths. Follow
+README setup for the explicitly configured script dispatch context.
 
-**Do not run `nixos-rebuild switch` until deployment, account/access changes, token
-provisioning, IRC connection, and the root control broker are explicitly approved.**
-The committed CI runs builds/tests only, with no real runtime credential or IRC.
+Provision an operator-approved runtime bearer-token file, initial bot config, and
+HTTPS JWKS endpoint separately. The token is delivered via systemd credentials,
+never embedded in a Nix store expression. Neither this repository nor CI creates
+credentials, accounts, issuer policy, or a real IRC connection. Both HTTP services
+bind loopback; no firewall ports are opened. JWKS authentication is not by itself
+per-user authorization: only approved administrators should have accepted tokens.
 
-## Authority boundaries
+Do not activate this module until deployment, accounts/access, credential
+provisioning, IRC use, and the fixed-unit control authority have been approved.
+These code changes and tests do not perform those live actions.
 
-* `/var/lib/limnoria-managed-plugins` is root-owned, mode 2770, with a
-  dedicated shared group containing only bot and companion users. New plugin
-  directories use 2770 and source files 0660. Both units get exactly this shared
-  path as an extra ReadWritePaths entry, without sharing the bot-state directory.
-  Controller file tools operate directly for offline repair. API file
-  operations use descriptor-relative, no-follow opens and constrained filenames.
-  MCPBridge and the broker are immutable Nix store code, not managed files.
-* `mcp-js-limnoria` is a separate user, **not** in `supybot`, `wheel`, or
-  `systemd-journal`. It cannot directly access bot state. Files are read/written
-  through the constrained controller MCP API, not `fs` or filesystem-prefix Rego
-  rules. Only the managed source directory is shared; bot state remains private.
-* The broker accepts only the exact companion UID using `SO_PEERCRED`; the
-  root-owned 0750 runtime directory and group-scoped 0660 socket also exclude
-  the bot UID. No sudo or polkit rule is installed.
-* The helper accepts one enum: start, stop, restart, status, logs. The root broker
-  owns the executable paths and fixed `supybot.service` argument. No caller can
-  supply a unit, shell, executable, environment, pager, extra flag, or journal
-  selector. Logs are at most 100 records and 16 KiB, with a 30-second subprocess
-  deadline. Status exposes only ActiveState/SubState/Result. Logs may contain
-  private IRC content or secrets emitted by plugins; do not forward them blindly.
-* Native mcp-js filesystem, subprocess, external-module and run-js-file access
-  are not enabled; outbound guest `fetch` is explicitly denied. Its `mcp_tools`
-  policy permits exactly the eight bridge tools. Credentialed stdio bootstrap
-  is trusted operator configuration, not guest subprocess access.
+## Files and users
 
-**Writable Python plugins grant arbitrary Python execution as the bot user when
-loaded/reloaded. This is not a secure sandbox for untrusted code.** Such code can
-read bot-account data and credentials or use the bot's IRC connection. UID
-separation protects the controller's root control socket from that bot identity;
-it does not make a malicious plugin safe. Give MCP access only to trusted bot
-administrators, review diffs before load, and keep bot credentials least-privilege.
+* `/var/lib/limnoria-managed-scripts` is root-owned 2770, with a dedicated group
+  shared only by `supybot` and `mcp-js-limnoria`. Files are exactly `NAME/script.tcl`;
+  descriptor-relative no-follow operations reject traversal, links, special files,
+  and unsupported names. No filename or arbitrary path parameter exists.
+* New directories request 0770 and inherit SGID/group from the root; both services
+  explicitly use UMask 0007. Source files use 0660. Unprivileged code never requests
+  SGID chmod, preserving `RestrictSUIDSGID` and Nix sandbox compatibility.
+* Only the script directory is an extra writable shared path. The companion has
+  no bot-state/group access. The bot is not in the service-control socket group.
+* The Tcl worker has its own UID/group, no supplemental groups, no credentials,
+  no managed-source access, no bot state, no controller state, and no access to the
+  service-control socket. It receives only bounded source/state/context JSON.
 
-## Source verification
+## Safe Tcl worker boundary
 
-The flake pins public mcp-js main commit
-[`54ac96cfc54da2cce2951fca83173cef7ba54318`](https://github.com/r33drichards/mcp-js/commit/54ac96cfc54da2cce2951fca83173cef7ba54318).
-Checked at that exact revision:
+Systemd owns `/run/limnoria-tcl-worker/worker.sock` as root, mode 0660, group
+`limnoria-tcl-client` (bot only). Socket activation supplies the listener fd to the
+worker; the worker has no membership in that group and cannot replace the socket.
+The broker additionally requires `SO_PEERCRED` to match the exact bot UID.
+Requests are single JSON lines, capped at 256 KiB with a three-second read deadline;
+the worker applies stricter source/state/request quotas. Responses are capped at
+64 KiB. Error responses contain no host exception or script details.
 
-* `nix/options.nix`, `server/src/cli.rs`, `server/src/config.rs`: `bin/server
-  --config` and bind_host/http_port/jwks_url/mcp_config/policies_json/
-  allow_external_modules/allow_run_js_file/mcp_stubs keys.
-* `server/src/engine/mcp_client.rs`: array entries with name, transport=`stdio`,
-  command, args; `mcp.listTools` / `mcp.callTool` callable through run_js.
-* `server/src/engine/opa.rs`: policy sources require `url` (not `inline`);
-  local file URLs and mcp_tools + fetch policy categories are supported.
-* `server/src/engine/fs.rs`: host filesystem policy gates the supplied path
-  before normal filesystem access. A naive startswith check is not symlink or
-  traversal confinement, so it is deliberately not used here.
+The separate worker unit has PrivateNetwork, AF_UNIX-only networking, read-only
+system/home protections, empty capabilities, NoNewPrivileges, RestrictSUIDSGID,
+256 MiB aggregate memory, eight tasks, and 50% CPU quota. Bot/controller credential,
+state, source, and control-socket paths are explicitly inaccessible. Each actual
+Tcl evaluation is a fresh child with CPU, address-space, process, output-file,
+open-descriptor and core limits plus an external two-second kill/reap timeout.
+No child inherits the listening socket or user-controlled environment/import path.
 
-Nixpkgs is pinned to NixOS 26.05 commit
-`1f607aa79b6356ed45d3cd3c8079c196e79efa2c`, whose Python MCP package is 1.26.0
-and standalone FastMCP package is 3.2.3 (verified from the exact revision's
-`pkgs/development/python-modules/fastmcp/default.nix`).
-Current unstable's MCP 2.x is deliberately not used with this package's `<2`
-constraint. Native [supybot module source](https://github.com/NixOS/nixpkgs/blob/nixos-26.05/nixos/modules/services/networking/supybot.nix)
-provides enable/stateDir/configFile/plugins/extraPackages and runs `supybot.service`.
-The upstream start-limit burst is raised from 1 to 10 per five minutes for debug
-restarts; repeated crashes can still hit systemd rate limits.
+Safe Tcl starts from `interp -safe`, further removes commands, and grants only
+validated reply, bounded state get/set, and explicit context-read capabilities.
+It has no filesystem, process, socket, package-loading, arbitrary IRC-command, or
+Python evaluation capability. Replies/state are released only after successful
+execution. This is defense in depth, not a claim that an interpreter can never
+have a vulnerability; do not remove the separate account and OS limits.
 
-## Validation and remaining gates
+Nix packages tkinter separately. To keep the child Python `-I` isolation without
+losing Tcl support, the package build replaces one trusted source constant with
+an immutable Nix store tkinter site-packages path. It is not taken from an
+environment variable, caller parameter, or writable directory.
 
-Local Python broker unit tests cover peer rejection, invalid actions, exact argv,
-trailing payload rejection, clean environment, and bounded output. Project tests
-cover plugin/API behavior separately. All 29 tests pass locally with standalone
-FastMCP 3.2.3 on both MCP 1.26.0 and 1.30.0. CI also declares Python 3.11–3.13
-coverage (not run locally). The authoring environment has **no Nix**:
-Nix evaluation, package build, and actual systemd runtime are **not yet verified**.
-CI includes `nix flake check --no-build`, a module evaluation fixture, the
-Python package build, and `checks.x86_64-linux.control-vm`. The isolated NixOS VM
-runs the real broker against a harmless synthetic `supybot.service`: cross-UID
-offline file repair, start/stop/restart/status, bounded unit-scoped logs, bot UID
-socket denial, and invalid unit/action rejection. The real companion is disabled,
-no token is provisioned, and no IRC network is used. The CI job is bounded to 60
-minutes. **This VM test has been authored but not run locally.** It does not test
-live mcp-js authentication, HTTP identity configuration, or a real IRC bot, and
-it does not build the large upstream mcp-js Rust package or deploy. Those remain
-explicitly authorized integration/activation gates after the synthetic VM passes.
-Generate and commit `flake.lock` in a Nix-enabled environment;
-top-level inputs are already revision-pinned, but no lockfile is fabricated here.
+## Restricted service debugging
+
+The existing root broker checks the companion UID and accepts only
+start/stop/restart/status/logs for fixed `supybot.service`. Executable paths and
+argv are immutable; no caller shell, executable, environment, unit name, extra
+flag, pager, or journal selector is accepted. No sudoers/polkit/journal-group grant
+is created. Logs are at most 100 records and 16 KiB with a 30-second deadline;
+status exposes only ActiveState/SubState/Result. Logs can contain private bot
+content and must not be forwarded blindly. This surface cannot restart or edit
+the Tcl worker, controller, or other system services.
+
+## mcp-js source and policies
+
+Public mcp-js revision
+[`54ac96cfc54da2cce2951fca83173cef7ba54318`](https://github.com/r33drichards/mcp-js/commit/54ac96cfc54da2cce2951fca83173cef7ba54318)
+is pinned. Its actual `nix/options.nix`, CLI/config parser, stdio MCP transport,
+and `server/src/engine/opa.rs` were checked: configuration uses `bin/server
+--config`, URL-based policy sources, and a static stdio upstream. The mcp_tools
+policy allows only the script-development and fixed service-control tools.
+Native filesystem, subprocess, external imports, and run-js-file capabilities
+are not enabled; guest fetch is explicitly denied. Raw fs prefix rules are not
+used because they would not themselves provide symlink/path confinement.
+
+Nixpkgs is revision-pinned to NixOS 26.05
+`1f607aa79b6356ed45d3cd3c8079c196e79efa2c`: FastMCP 3.2.3, MCP 1.26.0,
+and Limnoria 2026.3.21 (the latter confirmed by CI, distinct from local pip tests).
+Native upstream supplies `services.supybot`, not a separate services.limnoria
+module. Its restart burst is raised from one to ten per five minutes for debugging.
+
+## Optional main-only automatic bundle updates
+
+Set `services.limnoria-mcp.gitOps.enable = true` only during approved initial host
+configuration. Its repository defaults to this public repo; the timer polls main
+every five minutes (configurable `gitOps.interval`). It resolves an exact commit
+and builds only `packages.<system>.scriptBundle`. The output is flat Tcl data,
+never a host configuration, application launcher, activation hook or NixOS rebuild.
+There is no per-update approval gate once this explicitly configured mode runs.
+
+The updater is a separate unprivileged UID, never a trusted Nix user (the module
+rejects username, wildcard and declared-group trust). It writes only an atomic
+bounded candidate document under `/var/lib/limnoria-script-bundles`, mode 0640;
+the bot has read-only group access and the controller has none. The bot validates
+all candidate scripts through the isolated worker, writes its private durable
+last-good snapshot, then atomically swaps the whole live bundle. Rejection keeps
+both previous live and durable generations. Candidate publication is **not**
+activation acknowledgement: inspect `script_status` for the active revision/error.
+Direct `activate_script` is disabled in GitOps mode; MCP edits remain drafts and
+cannot bypass main. Valid main reverts provide script rollback without bot restart.
+
+Updater limits and credential denials are separate from the bot/worker. It does
+not accept repository flake configuration or lock updates; main must contain a
+reviewed real `flake.lock`. CI uploads its generated lockfile for review/commit.
+No lockfile is fabricated or the no-lock-update restriction waived. Updater
+cgroup/resource limits do **not** impose equivalent limits on nix-daemon workers;
+fixed Nix build-limit flags and the host's trusted daemon sandbox/resource policy
+are also required. Initial activation must verify actual daemon trust/group
+membership and constraints. See [bundle updater details](bundle-updater.md).
+
+## Validation gates
+
+Python tests exercise Tcl capability denial/limits, constrained script storage,
+last-good hot activation, protocol/authentication, and broker framing/UID checks.
+CI tests minimum/current SDK dependencies on Python 3.11–3.13. Nix checks include
+a real Nix CLI contract check, module evaluation, package build, and an isolated
+`control-vm` fixture. The contract check imports the updater's exact argv builder,
+builds only the current local locked flake's scriptBundle, and validates its actual
+Nix store output with the production Tcl-only reader. It also optimises the actual
+store when needed and asserts hardlinked files remain accepted only in the
+root-owned, read-only store output; mutable candidates remain single-link only.
+The runtime updater requires that standard multi-user Nix store ownership model.
+The check does not fetch remote
+main or publish/activate a candidate. Trusted CI creates and uploads the genuine
+lockfile before these checks, including when later checks fail.
+
+The VM uses a harmless synthetic bot service, actual service-control broker,
+separate users, both ownership directions of offline script repair, inherited
+modes/groups under real RestrictSUIDSGID/UMask, and the actual socket-activated Safe
+Tcl worker. It checks valid execution, forbidden commands, runaway rejection,
+recovery after failure, controller denial at the Tcl socket, and worker denial at
+source/bot-state/control paths. No credential, JWKS request or IRC is used; the
+real mcp-js unit is disabled. It is **not** live mcp-js authentication or IRC proof.
+
+The local authoring environment has no Nix. Earlier pre-Tcl CI passed evaluation
+but found package portability issues; those fixes are preserved. The redesigned
+package/VM still require a fresh CI pass; no Nix runtime success is claimed here.
+Generate/review/commit `flake.lock` from Nix CI before GitOps enablement; the CI
+artifact is provided for that purpose, and no lockfile is fabricated.

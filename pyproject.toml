@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "limnoria-mcp"
 version = "0.1.0"
-description = "Authenticated local MCP bridge for managed Limnoria plugins"
+description = "Isolated Safe Tcl scripts and FastMCP bridge for Limnoria"
 requires-python = ">=3.11"
 dependencies = ["fastmcp>=3.2.3,<4", "mcp>=1.26,<2", "uvicorn>=0.30,<1", "limnoria>=2025.1"]
 
