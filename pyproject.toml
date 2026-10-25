@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "limnoria-mcp"
+version = "0.1.0"
+description = "Authenticated local MCP bridge for managed Limnoria plugins"
+requires-python = ">=3.11"
+dependencies = ["fastmcp>=3.2.3,<4", "mcp>=1.26,<2", "uvicorn>=0.30,<1", "limnoria>=2025.1"]
+
+[project.optional-dependencies]
+test = ["pytest>=8", "httpx>=0.27"]
+
+[project.scripts]
+limnoria-mcp-control = "limnoria_mcp.control:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests", "nix"]
+
+[project.entry-points."limnoria.plugins"]
+MCPBridge = "MCPBridge"
