@@ -9,7 +9,7 @@ import subprocess
 import tempfile
 
 SOCKET = "/run/limnoria-mcp-control/control.sock"
-USER = "mcp-js-limnoria"
+USER = "limnoria-mcp-controller"
 SYSTEMCTL = "@systemctl@"
 JOURNALCTL = "@journalctl@"
 UNIT = "supybot.service"

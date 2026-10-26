@@ -3,8 +3,8 @@
 ## Runtime separation
 
 ```
-authenticated client -> loopback mcp-js companion
-  -> immutable stdio FastMCP controller
+authenticated client -> loopback mcp-js HTTP frontend (JWT required)
+  -> immutable loopback HTTP FastMCP controller (tokenless trusted host)
        -> descriptor-confined named script.tcl files (works with bot down)
        -> authenticated loopback immutable MCPBridge (validate/activate/status)
        -> fixed helper -> root single-unit service-control broker
@@ -37,7 +37,7 @@ README setup for the explicitly configured script dispatch context.
 Provision an operator-approved runtime bearer-token file, initial bot config, and
 HTTPS JWKS endpoint separately. The token is delivered via systemd credentials,
 never embedded in a Nix store expression. Neither this repository nor CI creates
-credentials, accounts, issuer policy, or a real IRC connection. Both HTTP services
+credentials, accounts, issuer policy, or a real IRC connection. All three HTTP services
 bind loopback; no firewall ports are opened. JWKS authentication is not by itself
 per-user authorization: only approved administrators should have accepted tokens.
 
@@ -45,17 +45,42 @@ Do not activate this module until deployment, accounts/access, credential
 provisioning, IRC use, and the fixed-unit control authority have been approved.
 These code changes and tests do not perform those live actions.
 
+## Deliberate trusted-local-host HTTP boundary
+
+The controller binds **only 127.0.0.1**, port 8767 by default. Per the requested
+local policy, it does not require a controller token. Host, Origin and request-size
+guards remain; every browser Origin is rejected. Outer mcp-js JWT protection and
+the separate bot MCP bearer token remain unchanged. Only bot and controller
+receive that bot credential; the frontend never receives it.
+
+**Any host-local process able to reach this port can use the controller's script
+editing and fixed service-control capabilities**, including processes under bot,
+updater or frontend UIDs. Network-enabled Nix fixed-output builders may also
+reach the host loopback controller; validating Tcl-only build output does not
+prevent that network side effect. Trust the configured repository/builders and
+other local workloads accordingly. This tokenless design is not suitable for
+untrusted builds sharing the host without a separately reviewed network or
+authentication boundary. UID-only raw Unix broker access is defense in depth,
+not end-to-end authorization for the tokenless HTTP route. Never expose or proxy
+this controller to an untrusted network without adding authentication. The Tcl
+worker's private network and AF_UNIX restriction prevent it reaching host-loopback
+HTTP; the VM tests that actual boundary. This is an explicit trusted-host model,
+not multi-user isolation between all local accounts.
+
 ## Files and users
 
 * `/var/lib/limnoria-managed-scripts` is root-owned 2770, with a dedicated group
-  shared only by `supybot` and `mcp-js-limnoria`. Files are exactly `NAME/script.tcl`;
+  shared only by `supybot` and `limnoria-mcp-controller`. Files are exactly `NAME/script.tcl`;
   descriptor-relative no-follow operations reject traversal, links, special files,
   and unsupported names. No filename or arbitrary path parameter exists.
 * New directories request 0770 and inherit SGID/group from the root; both services
   explicitly use UMask 0007. Source files use 0660. Unprivileged code never requests
   SGID chmod, preserving `RestrictSUIDSGID` and Nix sandbox compatibility.
-* Only the script directory is an extra writable shared path. The companion has
-  no bot-state/group access. The bot is not in the service-control socket group.
+* Only the script directory is an extra writable shared path. The controller and frontend have
+  no bot-state/group access. The frontend also has no direct script, raw broker
+  socket, or bot-token access; it calls the controller over HTTP. Bot state is
+  explicitly 0700 (including systemd StateDirectoryMode and pre-start repair),
+  rather than relying only on upstream tmpfiles permissions. The bot is not in the service-control socket group.
 * The Tcl worker has its own UID/group, no supplemental groups, no credentials,
   no managed-source access, no bot state, no controller state, and no access to the
   service-control socket. It receives only bounded source/state/context JSON.
@@ -92,7 +117,7 @@ environment variable, caller parameter, or writable directory.
 
 ## Restricted service debugging
 
-The existing root broker checks the companion UID and accepts only
+The existing root broker checks the dedicated controller UID and accepts only
 start/stop/restart/status/logs for fixed `supybot.service`. Executable paths and
 argv are immutable; no caller shell, executable, environment, unit name, extra
 flag, pager, or journal selector is accepted. No sudoers/polkit/journal-group grant
@@ -105,9 +130,14 @@ the Tcl worker, controller, or other system services.
 
 Public mcp-js revision
 [`54ac96cfc54da2cce2951fca83173cef7ba54318`](https://github.com/r33drichards/mcp-js/commit/54ac96cfc54da2cce2951fca83173cef7ba54318)
-is pinned. Its actual `nix/options.nix`, CLI/config parser, stdio MCP transport,
+is pinned. Its actual `nix/options.nix`, CLI/config parser, HTTP upstream MCP transport,
 and `server/src/engine/opa.rs` were checked: configuration uses `bin/server
---config`, URL-based policy sources, and a static stdio upstream. The mcp_tools
+--config`, URL-based policy sources, and an upstream entry exactly
+`{name:"limnoria", transport:"http", url:"http://127.0.0.1:8767/mcp"}`.
+No invented auth-header field is used. The controller has its own service and
+UID; ExecStartPost verifies a bounded real MCP initialization response before
+frontend startup, and the frontend retries failed starts. Both NO_PROXY spellings
+explicitly exclude loopback from ambient proxies. The mcp_tools
 policy allows only the script-development and fixed service-control tools.
 Native filesystem, subprocess, external imports, and run-js-file capabilities
 are not enabled; guest fetch is explicitly denied. Raw fs prefix rules are not
@@ -167,10 +197,17 @@ main or publish/activate a candidate. CI verifies and uploads the committed genu
 lockfile before these checks, including when later checks fail. A separate
 `mcp-js-cli` check builds the actual pinned companion binary, verifies required
 `--help` flags, and checks fail-closed rejection of an unknown config key with a
-ten-second deadline. This is CLI/build evidence, not live JWKS/authentication proof.
+ten-second deadline. CI then runs the actual pinned binary against a temporary
+HTTP controller with synthetic status helper and temporary drafts, verifies tool
+discovery and run_js → mcp.callTool read/write/status round trips, and checks
+loopback proxy bypass. Its client-facing transport is stdio only for the isolated
+test harness; production controller/upstream transport is HTTP. No real bot,
+credentials or JWKS are used, so live authentication remains unverified.
 
-The VM uses a harmless synthetic bot service, actual service-control broker,
-separate users, both ownership directions of offline script repair, inherited
+The VM uses a harmless synthetic bot service, actual tokenless HTTP controller
+(with no bot credential required for offline tools), actual service-control broker,
+separate users, actual HTTP bot-down repair/start/stop/status and Host/Origin
+checks, private bot-state mode repair, both ownership directions of script repair, inherited
 modes/groups under real RestrictSUIDSGID/UMask, and the actual socket-activated Safe
 Tcl worker. It checks valid execution, forbidden commands, runaway rejection,
 recovery after failure, controller denial at the Tcl socket, and worker denial at
@@ -184,3 +221,32 @@ and a local rnix parser accepts every repository Nix source (and rejects the old
 fixture). This proves syntax, not evaluation. The corrected package/VM and new
 pinned-companion build still require fresh CI passes; no VM/runtime or live
 authentication success is claimed here.
+
+
+### Public HTTP capability isolation
+
+Tcl HTTP capabilities use the fixed Unix socket of a separate
+`limnoria-http` broker. Only the `limnoria-tcl-worker` peer UID is accepted;
+its sole supplementary group grants that one socket capability. The worker
+retains `PrivateNetwork` and `AF_UNIX`-only sockets. The broker has public IP
+networking (and local AF_NETLINK interface discovery), but no bot/controller
+credentials, state, managed scripts, lifecycle socket, or journal privilege.
+It validates public destinations itself; direct internal/metadata/self requests
+and DNS rebinding are rejected, without a destination allowlist. See
+[public HTTP policy and limits](public-http.md).
+
+Validation/staging never makes HTTP requests. Runtime requests can cause external
+side effects, and an interrupted POST can have uncertain delivery; failures do
+not roll those effects back. The VM uses only internal-address rejection and
+synthetic policy tests, never a live public endpoint or webhook. Nix sandbox
+namespace checks verify the broker cannot read even a world-readable token at
+its configured original path. This is separate from the intentionally trusted
+host-local controller boundary described above.
+
+Both Unix execution boundaries use a `READY` admission handshake before the
+client sends any script or HTTP request payload. A restarted bot or killed
+worker that times out waiting behind an existing invocation therefore cannot
+leave a queued payload to execute later. Already-dispatched HTTP effects can
+still complete or remain uncertain; admission control is not cancellation or
+rollback. CI keeps a mandatory real Unix-socket, independent-process regression
+for this restart boundary, alongside the VM protocol checks.

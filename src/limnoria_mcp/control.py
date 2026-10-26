@@ -1,4 +1,4 @@
-"""Independent stdio MCP for a deployment-supplied, fixed service control helper."""
+"""Independent loopback-only HTTP MCP for a deployment-supplied, fixed service control helper."""
 import json
 import os
 import subprocess
@@ -19,8 +19,9 @@ def invoke(helper: str, action: str):
     return json.loads(result.stdout)
 
 
-def main():
-    helper = os.environ['LIMNORIA_MCP_CONTROL_HELPER']
+def create_controller_app(helper, files):
+    # Local processes are trusted with these capabilities. The caller must bind
+    # only loopback; this app must never be exposed by an unauthenticated proxy.
     if not os.path.isabs(helper):
         raise ValueError('Helper must be an absolute immutable deployment path')
     mcp = FastMCP('Limnoria service control')
@@ -40,8 +41,22 @@ def main():
         """Get bounded recent service logs; logs may contain private IRC content."""
         return invoke(helper, 'logs')
 
-    register_proxy(mcp)
-    mcp.run(transport='stdio')
+    register_proxy(mcp, files)
+    from .server import local_http_app
+    return local_http_app(mcp)
+
+
+def main():
+    import uvicorn
+    from .files import ScriptFiles
+    files = ScriptFiles(os.environ['LIMNORIA_MCP_SCRIPT_ROOT'])
+    try:
+        app = create_controller_app(os.environ['LIMNORIA_MCP_CONTROL_HELPER'], files)
+        uvicorn.run(app, host='127.0.0.1',
+                    port=int(os.environ.get('LIMNORIA_MCP_CONTROLLER_PORT', '8767')),
+                    access_log=False, log_level='warning')
+    finally:
+        files.close()
 
 
 async def proxy_tool(name: str, arguments: dict):
@@ -66,9 +81,7 @@ async def proxy_tool(name: str, arguments: dict):
                     return await session.call_tool(name, arguments)
 
 
-def register_proxy(mcp):
-    from .files import ScriptFiles
-    files = ScriptFiles(os.environ['LIMNORIA_MCP_SCRIPT_ROOT'])
+def register_proxy(mcp, files):
     @mcp.tool()
     async def list_scripts():
         """List Tcl scripts, even when the bot is down."""

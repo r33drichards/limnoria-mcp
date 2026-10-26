@@ -19,9 +19,6 @@ let
   helper = pkgs.writeShellScript "limnoria-service-control" ''
     exec ${pkgs.python3}/bin/python3 -I ${./control_client.py} "$@"
   '';
-  control = pkgs.writeShellScript "limnoria-mcp-upstream" ''
-    exec ${package}/bin/limnoria-mcp-control
-  '';
   policy = pkgs.writeText "limnoria-mcp-tools.rego" ''
     package mcp.tools
     default allow := false
@@ -39,9 +36,8 @@ let
   });
   upstream = pkgs.writeText "limnoria-mcp-upstream.json" (builtins.toJSON [{
     name = "limnoria";
-    transport = "stdio";
-    command = "${control}";
-    args = [ ];
+    transport = "http";
+    url = "http://127.0.0.1:${toString cfg.controllerPort}/mcp";
   }]);
   serverConfig = (pkgs.formats.toml { }).generate "limnoria-mcp-js.toml" {
     bind_host = "127.0.0.1";
@@ -79,6 +75,7 @@ in {
       description = "Operator-approved JWKS endpoint required to authenticate clients to the mcp-js HTTP endpoint.";
     };
     port = lib.mkOption { type = lib.types.port; default = 8766; };
+    controllerPort = lib.mkOption { type = lib.types.port; default = 8767; };
     botPort = lib.mkOption { type = lib.types.port; default = 8765; };
     gitOps = {
       enable = lib.mkEnableOption "main-only Tcl bundle updates (direct activation disabled)";
@@ -99,7 +96,7 @@ in {
       { assertion = !cfg.gitOps.enable || (config.nix.settings.sandbox or true) == true; message = "GitOps bundle builds require the Nix sandbox; do not trust the updater user."; }
       { assertion = !cfg.gitOps.enable || !updaterIsTrusted; message = "The bundle updater must not be a trusted Nix user."; }
       { assertion = !cfg.gitOps.enable || builtins.match "https://github.com/[A-Za-z0-9_-]+/[A-Za-z0-9_.-]+" cfg.gitOps.repository != null; message = "gitOps.repository must be a credential-free public GitHub repository URL."; }
-      { assertion = cfg.port != cfg.botPort; message = "mcp-js and bot ports must differ."; }
+      { assertion = cfg.port != cfg.botPort && cfg.controllerPort != cfg.botPort && cfg.controllerPort != cfg.port; message = "mcp-js, controller and bot ports must differ."; }
     ];
     services.supybot.extraPackages = p: [ (pkgs.callPackage ./package.nix { python3Packages = p; }) ];
     services.supybot.plugins.MCPBridge = ../src/MCPBridge;
@@ -110,6 +107,11 @@ in {
       # The upstream default burst of one start / five minutes prevents normal
       # debugging restarts. Still rate-limit repeated failures.
       startLimitBurst = lib.mkForce 10;
+      # StateDirectory's default 0755 can override upstream tmpfiles' 0700.
+      # Also repair already-existing/custom state roots before bot startup.
+      preStart = lib.mkBefore ''
+        ${pkgs.coreutils}/bin/chmod 0700 ${lib.escapeShellArg config.services.supybot.stateDir}
+      '';
       environment = {
         PYTHONDONTWRITEBYTECODE = "1";
         LIMNORIA_MCP_SCRIPT_ROOT = scriptRoot;
@@ -123,6 +125,7 @@ in {
       serviceConfig = {
         # Also set explicitly here: shared directories depend on group-write.
         UMask = lib.mkForce "0007";
+        StateDirectoryMode = lib.mkForce "0700";
         LoadCredential = [ "limnoria-token:${cfg.tokenFile}" ];
         ReadWritePaths = [ scriptRoot ];
         RestrictAddressFamilies = lib.mkAfter [ "AF_UNIX" ];
@@ -135,10 +138,13 @@ in {
     users.users.limnoria-tcl-worker = {
       isSystemUser = true;
       group = "limnoria-tcl-worker";
+      extraGroups = [ "limnoria-http-client" ];
     };
     users.users.supybot.extraGroups = [ "limnoria-managed-scripts" "limnoria-tcl-client" ]
       ++ lib.optional cfg.gitOps.enable "limnoria-script-readers";
-    users.users.mcp-js-limnoria = {
+    users.groups.mcp-js-limnoria = { };
+    users.users.mcp-js-limnoria = { isSystemUser = true; group = "mcp-js-limnoria"; };
+    users.users.limnoria-mcp-controller = {
       isSystemUser = true;
       group = "limnoria-mcp-control";
       extraGroups = [ "limnoria-managed-scripts" ];
@@ -155,10 +161,46 @@ in {
         RemoveOnStop = true;
       };
     };
+    users.groups.limnoria-http-client = { };
+    users.users.limnoria-http = {
+      isSystemUser = true;
+      group = "limnoria-http-client";
+    };
+    systemd.services.limnoria-http-broker = {
+      description = "Worker-only public HTTP broker (no host credentials)";
+      after = [ "network.target" ];
+      serviceConfig = hardening // {
+        ExecStart = "${workerPython}/bin/python3 -m limnoria_mcp.public_http --allowed-user limnoria-tcl-worker --socket /run/limnoria-http-broker/http.sock";
+        ExecStartPost = "${pkgs.python3}/bin/python3 -I ${./http_broker_ready.py}";
+        User = "limnoria-http";
+        Group = "limnoria-http-client";
+        RuntimeDirectory = "limnoria-http-broker";
+        RuntimeDirectoryMode = "0750";
+        WorkingDirectory = "/";
+        # Only this broker has IP networking. AF_NETLINK is needed solely for
+        # libc getifaddrs to reject this host's own interface addresses.
+        RestrictAddressFamilies = [ "AF_UNIX" "AF_INET" "AF_INET6" "AF_NETLINK" ];
+        RestrictNamespaces = true;
+        CapabilityBoundingSet = "";
+        MemoryDenyWriteExecute = true;
+        MemoryMax = "256M";
+        TasksMax = 8;
+        CPUQuota = "50%";
+        InaccessiblePaths = [
+          "-/run/credentials" "-${cfg.tokenFile}"
+          "-${toString config.services.supybot.configFile}" "-${config.services.supybot.stateDir}"
+          "-/var/lib/mcp-js-limnoria" "-/var/lib/limnoria-mcp-controller" "-${scriptRoot}"
+          "-/run/limnoria-mcp-control" "-/run/limnoria-tcl-worker"
+          "-/var/lib/limnoria-script-bundles"
+        ];
+        Restart = "on-failure";
+        RestartSec = 1;
+      };
+    };
     systemd.services.limnoria-tcl-worker = {
       description = "Credential-free unprivileged Safe Tcl worker";
-      requires = [ "limnoria-tcl-worker.socket" ];
-      after = [ "limnoria-tcl-worker.socket" ];
+      requires = [ "limnoria-tcl-worker.socket" "limnoria-http-broker.service" ];
+      after = [ "limnoria-tcl-worker.socket" "limnoria-http-broker.service" ];
       environment.PYTHONDONTWRITEBYTECODE = "1";
       serviceConfig = hardening // {
         ExecStart = "${workerPython}/bin/python3 ${./tcl_broker.py}";
@@ -176,7 +218,7 @@ in {
         InaccessiblePaths = [
           "-/run/credentials" "-${cfg.tokenFile}"
           "-${toString config.services.supybot.configFile}" "-${config.services.supybot.stateDir}"
-          "-/var/lib/mcp-js-limnoria" "-${scriptRoot}"
+          "-/var/lib/mcp-js-limnoria" "-/var/lib/limnoria-mcp-controller" "-${scriptRoot}"
           "-/run/limnoria-mcp-control" "-/var/lib/limnoria-script-bundles"
         ];
         Restart = "on-failure";
@@ -212,7 +254,7 @@ in {
         InaccessiblePaths = [
           "-/run/credentials" "-${cfg.tokenFile}" "-${config.services.supybot.stateDir}"
           "-${toString config.services.supybot.configFile}" "-${scriptRoot}"
-          "-/var/lib/mcp-js-limnoria" "-/run/limnoria-mcp-control" "-/run/limnoria-tcl-worker"
+          "-/var/lib/mcp-js-limnoria" "-/var/lib/limnoria-mcp-controller" "-/run/limnoria-mcp-control" "-/run/limnoria-tcl-worker"
         ];
       };
     };
@@ -236,30 +278,66 @@ in {
         Restart = "on-failure";
       };
     };
-    systemd.services.mcp-js-limnoria = {
-      description = "Authenticated mcp-js companion for Limnoria";
+    systemd.services.limnoria-mcp-controller = {
+      description = "Trusted-host loopback HTTP FastMCP controller";
       wantedBy = [ "multi-user.target" ];
       after = [ "network.target" "limnoria-mcp-control.service" ];
       requires = [ "limnoria-mcp-control.service" ];
-      # Intentionally no Requires/BindsTo supybot: recovery must survive its exit.
+      # No bot dependency: edits and fixed-unit recovery work with the bot down.
       environment = {
         LIMNORIA_MCP_CONTROL_HELPER = "${helper}";
         LIMNORIA_MCP_SCRIPT_ROOT = scriptRoot;
         PYTHONDONTWRITEBYTECODE = "1";
         LIMNORIA_MCP_TOKEN_FILE = "%d/limnoria-token";
         LIMNORIA_MCP_PORT = toString cfg.botPort;
+        LIMNORIA_MCP_CONTROLLER_PORT = toString cfg.controllerPort;
       };
       serviceConfig = hardening // {
-        ExecStart = "${cfg.mcpJsPackage}/bin/server --config ${serverConfig}";
-        User = "mcp-js-limnoria";
+        ExecStart = "${package}/bin/limnoria-mcp-control";
+        ExecStartPost = "${pkgs.python3}/bin/python3 -I ${./controller_ready.py} ${toString cfg.controllerPort}";
+        User = "limnoria-mcp-controller";
         Group = "limnoria-mcp-control";
         LoadCredential = [ "limnoria-token:${cfg.tokenFile}" ];
         UMask = lib.mkForce "0007";
         ReadWritePaths = [ scriptRoot ];
+        StateDirectory = "limnoria-mcp-controller";
+        StateDirectoryMode = "0700";
+        InaccessiblePaths = [
+          "-${config.services.supybot.stateDir}" "-${toString config.services.supybot.configFile}"
+          "-${cfg.tokenFile}" "-/var/lib/limnoria-script-bundles" "-/run/limnoria-tcl-worker"
+        ];
+        WorkingDirectory = "/var/lib/limnoria-mcp-controller";
+        RestrictAddressFamilies = [ "AF_UNIX" "AF_INET" "AF_INET6" ];
+        CapabilityBoundingSet = "";
+        Restart = "on-failure";
+        RestartSec = 2;
+      };
+    };
+    systemd.services.mcp-js-limnoria = {
+      description = "Authenticated mcp-js HTTP frontend for Limnoria";
+      wantedBy = [ "multi-user.target" ];
+      after = [ "network.target" "limnoria-mcp-controller.service" ];
+      requires = [ "limnoria-mcp-controller.service" ];
+      # Never route trusted loopback upstream traffic through ambient proxies.
+      environment = {
+        NO_PROXY = "127.0.0.1,localhost,::1";
+        no_proxy = "127.0.0.1,localhost,::1";
+      };
+      # ExecStartPost above gates frontend startup on actual MCP readiness.
+      serviceConfig = hardening // {
+        ExecStart = "${cfg.mcpJsPackage}/bin/server --config ${serverConfig}";
+        User = "mcp-js-limnoria";
+        Group = "mcp-js-limnoria";
         StateDirectory = "mcp-js-limnoria";
         WorkingDirectory = "/var/lib/mcp-js-limnoria";
         RestrictAddressFamilies = [ "AF_UNIX" "AF_INET" "AF_INET6" ];
         CapabilityBoundingSet = "";
+        InaccessiblePaths = [
+          "-/run/credentials" "-${cfg.tokenFile}" "-${config.services.supybot.stateDir}"
+          "-${toString config.services.supybot.configFile}" "-${scriptRoot}"
+          "-/var/lib/limnoria-mcp-controller" "-/var/lib/limnoria-script-bundles"
+          "-/run/limnoria-mcp-control" "-/run/limnoria-tcl-worker"
+        ];
         Restart = "on-failure";
         RestartSec = 2;
       };

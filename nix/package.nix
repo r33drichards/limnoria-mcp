@@ -1,4 +1,4 @@
-{ python3Packages }:
+{ python3Packages, cacert }:
 python3Packages.buildPythonPackage {
   pname = "limnoria-mcp";
   version = "0.1.0";
@@ -10,6 +10,9 @@ python3Packages.buildPythonPackage {
     substituteInPlace src/limnoria_mcp/tcl_worker.py \
       --replace-fail "TKINTER_SEARCH_PATH = None" \
       "TKINTER_SEARCH_PATH = '${python3Packages.tkinter}/${python3Packages.python.sitePackages}'"
+    substituteInPlace src/limnoria_mcp/public_http.py \
+      --replace-fail "PUBLIC_CA_FILE = None" \
+      "PUBLIC_CA_FILE = '${cacert}/etc/ssl/certs/ca-bundle.crt'"
   '';
   build-system = [ python3Packages.setuptools ];
   dependencies = with python3Packages; [ fastmcp mcp uvicorn limnoria tkinter ];

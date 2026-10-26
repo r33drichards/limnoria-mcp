@@ -10,6 +10,10 @@
     in {
       packages = eachSystem (system: let pkgs = import nixpkgs { inherit system; }; in {
         default = pkgs.callPackage ./nix/package.nix { };
+        mcp-js = mcp-js.packages.${system}.default;
+        http-test-python = pkgs.python3.withPackages (_: [
+          (pkgs.callPackage ./nix/package.nix { })
+        ]);
         # Only inert Tcl source files; no executable activation output.
         scriptBundle = pkgs.runCommand "limnoria-tcl-script-bundle" { } ''
           mkdir -p "$out"
@@ -73,19 +77,26 @@
           assert !(builtins.all (a: a.assertion) groupTrusted.config.assertions);
           assert !(builtins.all (a: a.assertion) overriddenGroupTrusted.config.assertions);
           assert c.systemd.services.mcp-js-limnoria.serviceConfig.User != "supybot";
-          assert c.systemd.services.mcp-js-limnoria.serviceConfig.UMask == "0007";
+          assert c.systemd.services.limnoria-mcp-controller.serviceConfig.UMask == "0007";
           assert c.systemd.services.supybot.serviceConfig.UMask == "0007";
+          assert c.systemd.services.supybot.serviceConfig.StateDirectoryMode == "0700";
           assert !(builtins.elem "supybot.service" c.systemd.services.mcp-js-limnoria.requires);
           assert !(builtins.elem "limnoria-mcp-control" c.users.users.supybot.extraGroups);
-          assert !(builtins.elem "supybot" c.users.users.mcp-js-limnoria.extraGroups);
-          assert c.users.users.limnoria-tcl-worker.extraGroups == [ ];
+          assert !(builtins.elem "supybot" c.users.users.limnoria-mcp-controller.extraGroups);
+          assert c.users.users.mcp-js-limnoria.extraGroups == [ ];
+          assert c.users.users.mcp-js-limnoria.group != "limnoria-mcp-control";
+          assert c.users.users.limnoria-tcl-worker.extraGroups == [ "limnoria-http-client" ];
+          assert c.users.users.limnoria-http.extraGroups == [ ];
+          assert c.systemd.services.limnoria-http-broker.serviceConfig.User == "limnoria-http";
+          assert c.systemd.services.limnoria-tcl-worker.serviceConfig.RestrictAddressFamilies == [ "AF_UNIX" ];
           assert !(builtins.elem "limnoria-tcl-client" c.users.users.mcp-js-limnoria.extraGroups);
           assert c.systemd.services.limnoria-tcl-worker.serviceConfig.PrivateNetwork;
           assert c.systemd.sockets.limnoria-tcl-worker.socketConfig.SocketGroup == "limnoria-tcl-client";
-          assert builtins.elem "/var/lib/limnoria-managed-scripts" c.systemd.services.mcp-js-limnoria.serviceConfig.ReadWritePaths;
-          assert c.systemd.services.mcp-js-limnoria.environment.LIMNORIA_MCP_SCRIPT_ROOT == "/var/lib/limnoria-managed-scripts";
+          assert builtins.elem "/var/lib/limnoria-managed-scripts" c.systemd.services.limnoria-mcp-controller.serviceConfig.ReadWritePaths;
+          assert c.systemd.services.limnoria-mcp-controller.environment.LIMNORIA_MCP_SCRIPT_ROOT == "/var/lib/limnoria-managed-scripts";
           pkgs.writeText "limnoria-module-evaluated" (builtins.unsafeDiscardStringContext (builtins.toJSON {
             bot = c.systemd.services.supybot.serviceConfig.ExecStart;
+            controller = c.systemd.services.limnoria-mcp-controller.serviceConfig.ExecStart;
             companion = c.systemd.services.mcp-js-limnoria.serviceConfig.ExecStart;
             broker = c.systemd.services.limnoria-mcp-control.serviceConfig.ExecStart;
             worker = c.systemd.services.limnoria-tcl-worker.serviceConfig.ExecStart;

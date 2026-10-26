@@ -58,5 +58,12 @@ jobs:
       - uses: cachix/install-nix-action@v31
       - name: Build pinned mcp-js and check actual CLI/config rejection
         run: nix build .#checks.x86_64-linux.mcp-js-cli --no-update-lock-file --no-write-lock-file --print-build-logs --cores 2 --max-jobs 2
+      - name: Materialize pinned frontend and Python HTTP integration environment
+        run: |
+          nix build .#mcp-js -o result-mcp-js --no-update-lock-file --no-write-lock-file
+          nix build .#http-test-python -o result-http-python --no-update-lock-file --no-write-lock-file
+      - name: Actual mcp-js to loopback HTTP controller discovery and tools
+        timeout-minutes: 5
+        run: result-http-python/bin/python3 nix/check_http_transport.py result-mcp-js/bin/server
 # Only isolated synthetic VM services start; no live service changes,
 # credential provisioning, IRC networking, or deployment in CI.

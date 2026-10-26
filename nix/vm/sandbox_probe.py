@@ -16,3 +16,12 @@ else:
     sock.close()
     raise AssertionError('worker can create an Internet socket')
 print('WORKER-SANDBOX-PROBE-PASSED')
+# The real controller is already listening on host loopback. A Tcl worker must
+# not acquire its intentionally tokenless capabilities through that HTTP path.
+try:
+    connection = socket.create_connection(('127.0.0.1', 8767), timeout=1)
+except OSError:
+    pass
+else:
+    connection.close()
+    raise AssertionError('worker can reach the host HTTP controller')

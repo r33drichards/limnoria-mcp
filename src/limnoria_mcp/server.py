@@ -7,8 +7,10 @@ from starlette.responses import JSONResponse
 
 
 class LocalBearer:
-    def __init__(self, app, token):
-        self.app, self.token = app, token.encode()
+    """Shared local-request guards; optional bearer for the authenticated bot only."""
+    def __init__(self, app, token=None):
+        self.app = app
+        self.token = token.encode() if token is not None else None
 
     async def __call__(self, scope, receive, send):
         if scope['type'] == 'http':
@@ -20,7 +22,8 @@ class LocalBearer:
                 await JSONResponse({'detail': 'Invalid Host'}, status_code=421)(scope, receive, send)
                 return
             # No browser origins, even with a token.
-            if b'origin' in headers or not hmac.compare_digest(supplied, b'Bearer ' + self.token):
+            if b'origin' in headers or (self.token is not None and
+                    not hmac.compare_digest(supplied, b'Bearer ' + self.token)):
                 await JSONResponse({'detail': 'Unauthorized'}, status_code=401)(scope, receive, send)
                 return
             size = headers.get(b'content-length', b'0')
@@ -57,9 +60,20 @@ class LocalBearer:
         await self.app(scope, receive, send)
 
 
-def create_app(files, runtime, token: str):
+def local_http_app(mcp):
+    """Tokenless only for a strict loopback-bound trusted-host service."""
+    return mcp.http_app(path='/mcp', stateless_http=True, json_response=True,
+                        middleware=[Middleware(LocalBearer)])
+
+
+def authenticated_http_app(mcp, token: str):
     if len(token) < 32 or token.strip() != token:
         raise ValueError('Supply an external bearer token of at least 32 characters')
+    return mcp.http_app(path='/mcp', stateless_http=True, json_response=True,
+                        middleware=[Middleware(LocalBearer, token=token)])
+
+
+def create_app(files, runtime, token: str):
     mcp = FastMCP('Limnoria Safe Tcl scripts')
 
     @mcp.tool()
@@ -90,7 +104,7 @@ def create_app(files, runtime, token: str):
     @mcp.tool()
     def script_status() -> dict:
         """List active script versions without exposing per-script state."""
-        return {'scripts': runtime.status(), 'bundle': runtime.bundle_status()}
+        return {'scripts': runtime.status(), 'bundle': runtime.bundle_status(),
+                'network_effects':runtime.network_status()}
 
-    return mcp.http_app(path='/mcp', stateless_http=True, json_response=True,
-                        middleware=[Middleware(LocalBearer, token=token)])
+    return authenticated_http_app(mcp, token)

@@ -8,7 +8,7 @@ import unittest
 class VmSourceTests(unittest.TestCase):
     def test_all_python_fixtures_parse(self):
         directory = Path(__file__).with_name('vm')
-        self.assertEqual(len(list(directory.glob('*.py'))), 7)
+        self.assertEqual(len(list(directory.glob('*.py'))), 10)
         for source in directory.glob('*.py'):
             with self.subTest(source=source.name):
                 ast.parse(source.read_text(), filename=str(source))
@@ -19,7 +19,7 @@ class VmSourceTests(unittest.TestCase):
         markers = set(re.findall(r'@[A-Za-z]+@', driver))
         self.assertEqual(markers, {'@plainPython@', '@packagePython@', '@controlClient@',
                                    '@fileProbe@', '@publishFixture@', '@bundleProbe@',
-                                   '@workerProbe@', '@invalidProbe@'})
+                                   '@workerProbe@', '@invalidProbe@', '@httpControllerProbe@', '@publicHttpProbe@'})
         nix = (directory / 'test-vm.nix').read_text()
         for marker in markers:
             self.assertIn('"' + marker + '"', nix)

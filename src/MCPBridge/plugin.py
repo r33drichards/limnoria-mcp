@@ -44,8 +44,12 @@ class MCPBridge(callbacks.Plugin):
                    'nick': msg.nick, 'text': text or ''}
         try:
             result = self.runtime.invoke(name, context)
-        except Exception:
-            irc.error('Safe Tcl execution failed; no script replies or state were committed.')
+        except Exception as exc:
+            effects = getattr(exc, 'effects', [])
+            identifiers = ', '.join(effect['operation_id'] for effect in effects)
+            detail = (' Operations: ' + identifiers) if identifiers else ''
+            irc.error('Safe Tcl failed; replies/state were discarded, but external HTTP effects '
+                      'may have occurred. Do not automatically retry.' + detail)
             return
         for reply in result['replies']:
             irc.reply(reply, prefixNick=False)

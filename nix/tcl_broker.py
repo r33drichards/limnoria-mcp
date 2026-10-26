@@ -14,6 +14,11 @@ def serve_connection(conn, allowed_uid, execute):
     _, uid, _ = struct.unpack('3i', conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
     if uid != allowed_uid:
         return
+    # Admission is sent only by the serial accept loop when execution is free.
+    # Clients must not enqueue a script before this handshake. A restarted bot
+    # timing out behind an old invocation therefore leaves no deferred effects.
+    conn.settimeout(2)
+    conn.sendall(b'READY\n')
     deadline = time.monotonic() + 3
     data = bytearray()
     while len(data) <= MAX_REQUEST:
@@ -28,6 +33,8 @@ def serve_connection(conn, allowed_uid, execute):
         if b'\n' in chunk:
             break
     try:
+        if time.monotonic() >= deadline:
+            raise ValueError('request deadline exceeded')
         if len(data) > MAX_REQUEST or not data.endswith(b'\n') or data.count(b'\n') != 1:
             raise ValueError('invalid framing')
         request = json.loads(data)
@@ -36,8 +43,11 @@ def serve_connection(conn, allowed_uid, execute):
         response = json.dumps(result, ensure_ascii=False).encode('utf-8') + b'\n'
         if len(response) > MAX_RESPONSE:
             raise ValueError('oversized result')
-    except (ValueError, TypeError, RuntimeError, UnicodeError, RecursionError):
-        response = b'{"error":"script execution rejected or failed"}\n'
+    except (ValueError, TypeError, RuntimeError, UnicodeError, RecursionError) as exc:
+        response = json.dumps({"error": "script execution rejected or failed",
+                               "effects": getattr(exc, "effects", [])}).encode() + b"\n"
+        if len(response) > MAX_RESPONSE:
+            response = b'{"error":"script execution rejected; effect details unavailable","effects":[]}\n'
     conn.settimeout(2)
     conn.sendall(response)
 
