@@ -92,7 +92,11 @@ link/special-file rejection, size limits, exact-main SHA/fixed-output argv,
 ambient credential/config removal, overlap exclusion, and failed build/replace
 preservation. Runtime watcher tests cover staging, acknowledgement and last-good
 restore. Nix evaluation/build and VM tests remain separate gates: Python fixtures
-do not claim a successful real Nix build or deployed service.
+do not claim a successful real Nix build or deployed service. Separately, actual
+CI passed the production Nix flags against the local flake and validated its
+optimized-store Tcl output. The genuine CI-generated lockfile is now committed;
+CI verifies it without updates. Host/VM and companion authentication checks
+remain separate from this bundle-only evidence.
 
 Nix command/configuration references:
 [build and lock flags](https://nix.dev/manual/nix/2.28/command-ref/new-cli/nix3-build.html),

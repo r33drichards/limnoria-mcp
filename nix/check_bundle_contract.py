@@ -1,7 +1,7 @@
 """CI-only: exercise the production Nix flags on this local, locked flake.
 
 This does not resolve remote main, publish a candidate, or activate anything.
-Run from the repo root with PYTHONPATH=src after trusted `nix flake lock`.
+Run from the repo root with PYTHONPATH=src and the reviewed, committed lockfile.
 """
 import json
 import re
@@ -16,9 +16,9 @@ from limnoria_mcp.bundle_update import (
 def main():
     root = Path.cwd().resolve()
     if not (root / 'flake.lock').is_file():
-        raise SystemExit('trusted CI must generate/review flake.lock first')
-    # Fixed CI architecture/output; path: includes the newly generated lockfile,
-    # even before it has been committed. No repository apps/host outputs run.
+        raise SystemExit('the reviewed flake.lock must be committed first')
+    # Fixed CI architecture/output; path: uses this reviewed checkout and its
+    # committed lockfile. No repository apps/host outputs run.
     installable = f'path:{root}#packages.x86_64-linux.scriptBundle'
     with tempfile.TemporaryDirectory(prefix='bundle-contract-') as home:
         result = json.loads(_run(nix_build_argv(installable), clean_environment(home)))

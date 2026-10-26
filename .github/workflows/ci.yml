@@ -29,9 +29,12 @@ jobs:
         with:
           persist-credentials: false
       - uses: cachix/install-nix-action@v31
-      - name: Generate lockfile in trusted CI (not in runtime updater)
-        run: nix flake lock
-      - name: Preserve authentic generated lockfile for review and commit
+      - name: Verify the committed CI-generated lockfile without updates
+        run: |
+          test -f flake.lock
+          nix flake metadata --no-update-lock-file --no-write-lock-file
+          git diff --exit-code -- flake.lock
+      - name: Preserve evaluated committed lockfile as build evidence
         if: always() && hashFiles('flake.lock') != ''
         uses: actions/upload-artifact@v4
         with:
@@ -45,5 +48,15 @@ jobs:
       - run: nix build .#checks.x86_64-linux.module-eval .#default --print-build-logs
       - name: Isolated broker and file-permission VM (no IRC or credentials)
         run: nix build .#checks.x86_64-linux.control-vm --print-build-logs
+  mcp-js-build:
+    timeout-minutes: 90
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@v31
+      - name: Build pinned mcp-js and check actual CLI/config rejection
+        run: nix build .#checks.x86_64-linux.mcp-js-cli --no-update-lock-file --no-write-lock-file --print-build-logs --cores 2 --max-jobs 2
 # Only isolated synthetic VM services start; no live service changes,
 # credential provisioning, IRC networking, or deployment in CI.

@@ -141,8 +141,10 @@ cannot bypass main. Valid main reverts provide script rollback without bot resta
 
 Updater limits and credential denials are separate from the bot/worker. It does
 not accept repository flake configuration or lock updates; main must contain a
-reviewed real `flake.lock`. CI uploads its generated lockfile for review/commit.
-No lockfile is fabricated or the no-lock-update restriction waived. Updater
+reviewed real `flake.lock`. The committed lockfile was retrieved from the actual
+Nix CI artifact, hash-checked, and checked against the approved input revisions.
+CI now verifies it without updates and retains it as build evidence. No lockfile
+hashes were fabricated or the no-lock-update restriction waived. Updater
 cgroup/resource limits do **not** impose equivalent limits on nix-daemon workers;
 fixed Nix build-limit flags and the host's trusted daemon sandbox/resource policy
 are also required. Initial activation must verify actual daemon trust/group
@@ -161,8 +163,11 @@ store when needed and asserts hardlinked files remain accepted only in the
 root-owned, read-only store output; mutable candidates remain single-link only.
 The runtime updater requires that standard multi-user Nix store ownership model.
 The check does not fetch remote
-main or publish/activate a candidate. Trusted CI creates and uploads the genuine
-lockfile before these checks, including when later checks fail.
+main or publish/activate a candidate. CI verifies and uploads the committed genuine
+lockfile before these checks, including when later checks fail. A separate
+`mcp-js-cli` check builds the actual pinned companion binary, verifies required
+`--help` flags, and checks fail-closed rejection of an unknown config key with a
+ten-second deadline. This is CLI/build evidence, not live JWKS/authentication proof.
 
 The VM uses a harmless synthetic bot service, actual service-control broker,
 separate users, both ownership directions of offline script repair, inherited
@@ -172,8 +177,10 @@ recovery after failure, controller denial at the Tcl socket, and worker denial a
 source/bot-state/control paths. No credential, JWKS request or IRC is used; the
 real mcp-js unit is disabled. It is **not** live mcp-js authentication or IRC proof.
 
-The local authoring environment has no Nix. Earlier pre-Tcl CI passed evaluation
-but found package portability issues; those fixes are preserved. The redesigned
-package/VM still require a fresh CI pass; no Nix runtime success is claimed here.
-Generate/review/commit `flake.lock` from Nix CI before GitOps enablement; the CI
-artifact is provided for that purpose, and no lockfile is fabricated.
+The local authoring environment has no Nix. Actual CI has passed the production
+Nix CLI/optimized-store contract and Python matrix; it then found a nested Nix/
+Python quoting error in the VM fixture. All VM Python is now in separate files,
+and a local rnix parser accepts every repository Nix source (and rejects the old
+fixture). This proves syntax, not evaluation. The corrected package/VM and new
+pinned-companion build still require fresh CI passes; no VM/runtime or live
+authentication success is claimed here.

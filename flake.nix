@@ -48,6 +48,25 @@
           nix.settings.trusted-users = nixpkgs.lib.mkForce [ "@limnoria-script-readers" ];
         }]; };
       in {
+        mcp-js-cli = pkgs.runCommand "limnoria-pinned-mcp-js-cli-smoke" {
+          nativeBuildInputs = [ pkgs.gnugrep ];
+        } ''
+          # Real pinned companion binary, not the synthetic VM stub. No listener,
+          # upstream, issuer request, credential, or IRC connection is started.
+          server=${mcp-js.packages.${system}.default}/bin/server
+          ${pkgs.coreutils}/bin/timeout 10 "$server" --help > help.txt
+          for flag in --config --bind-host --http-port --jwks-url --mcp-config --policies-json; do
+            grep -F -- "$flag" help.txt
+          done
+          printf 'invalid_limnoria_smoke_key = true\n' > invalid.toml
+          if ${pkgs.coreutils}/bin/timeout 10 "$server" --config "$PWD/invalid.toml" > rejected.txt 2>&1; then
+            echo "server accepted an unknown config key" >&2
+            exit 1
+          fi
+          grep -F 'unknown key: invalid_limnoria_smoke_key' rejected.txt
+          mkdir -p "$out"
+          cp help.txt rejected.txt "$out/"
+        '';
         control-vm = pkgs.callPackage ./nix/test-vm.nix { };
         module-eval = assert builtins.all (a: a.assertion) c.assertions;
           assert !(builtins.all (a: a.assertion) wildcardTrusted.config.assertions);
