@@ -1,6 +1,7 @@
 import pathlib, sys
 from limnoria_mcp.files import ScriptFiles
 from limnoria_mcp.runtime import ScriptRuntime
+from limnoria_mcp.tcl_worker import TclExecutionError
 from limnoria_mcp.bundle_runtime import BundleWatcher
 files = ScriptFiles('/var/lib/limnoria-managed-scripts')
 runtime = ScriptRuntime(files, gitops=True)
@@ -11,7 +12,7 @@ old = pathlib.Path(last_good).read_bytes() if pathlib.Path(last_good).exists() e
 old_status = runtime.status()
 try:
     watcher.check()
-except ValueError:
+except (ValueError, TclExecutionError):
     assert sys.argv[1] == 'reject'
     assert pathlib.Path(last_good).read_bytes() == old
     assert runtime.status() == old_status
